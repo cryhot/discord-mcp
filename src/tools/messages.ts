@@ -5,6 +5,7 @@ import {
   PrivateThreadChannel,
   Message,
   MessageReaction,
+  type MessagePin,
   Routes,
   SnowflakeUtil,
   DiscordAPIError,
@@ -114,6 +115,11 @@ function findReaction(msg: Message, emoji: string): MessageReaction | undefined 
   const key = customId ? (customId[1] ?? customId[2]) : emoji;
   return msg.reactions.cache.get(key);
 }
+
+/** Discord's page size for `GET /channels/{id}/messages/pins`. */
+const PINS_PAGE_SIZE = 50;
+/** Upper bound on pin pages walked per call, so a cursor that stops advancing cannot loop forever. */
+const MAX_PIN_PAGES = 20;
 
 /** Mirrors discord.js `User#tag`, which raw API users lack. Both "0" and "0000" mean migrated. */
 function userTag(user: { username: string; discriminator: string }): string {
@@ -820,7 +826,7 @@ const tools = [
   }),
   defineTool({
     name: "discord_fetch_pinned_messages",
-    description: `List all pinned messages in a channel. Returns { messages: [...] } with id, author, content, ${embedsReturned}, timestamp, pinnedAt. Read-only. Use discord_pin_message to change which messages are pinned.`,
+    description: `List all pinned messages in a channel, most recently pinned first, following Discord's 50-per-request pin pages (up to 1000 pins). Returns { messages: [...] } with id, author, content, ${embedsReturned}, timestamp, pinnedAt. Read-only. Use discord_pin_message to change which messages are pinned.`,
     annotations: { title: "Fetch pinned messages", readOnlyHint: true, openWorldHint: true },
     schema: z.object({
       channel_id: snowflake.describe("ID (snowflake) of the channel or thread to list pins from."),
@@ -830,8 +836,21 @@ const tools = [
     }),
     handle: async ({ channel_id }) => {
       const channel = await getTextChannel(channel_id);
-      const pinned = await channel.messages.fetchPins();
-      const result = pinned.items.map(({ message: m, pinnedAt }) => ({
+      // The pins endpoint pages at 50, newest pin first: walk back by pin time while it has more.
+      const pins: MessagePin<true>[] = [];
+      let before: Date | undefined;
+      for (let page = 0; page < MAX_PIN_PAGES; page++) {
+        const { items, hasMore } = await channel.messages.fetchPins({
+          before,
+          limit: PINS_PAGE_SIZE,
+          cache: false,
+        });
+        pins.push(...items);
+        const oldest = items.at(-1)?.pinnedAt;
+        if (!hasMore || !oldest || oldest.getTime() === before?.getTime()) break;
+        before = oldest;
+      }
+      const result = pins.map(({ message: m, pinnedAt }) => ({
         id: m.id,
         author: m.author.tag,
         content: m.content,
