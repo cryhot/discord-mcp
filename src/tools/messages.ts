@@ -21,9 +21,9 @@ import {
   embedArraySchema,
   embedSummary,
   summarizeEmbed,
-  embedText,
 } from "../embeds.js";
 import { hasField } from "../messageFilters.js";
+import { messageTexts, textSourceOfMessage } from "../messageText.js";
 import { defineModule, defineTool, snowflake, guildId, intIn, structured } from "./define.js";
 
 const channelId = snowflake.describe("ID (snowflake) of the channel or thread.");
@@ -591,14 +591,14 @@ const tools = [
   }),
   defineTool({
     name: "discord_search_messages",
-    description: `Keyword search over a channel's recent messages using case-insensitive substring matching against message content and embed text. Scans only up to the last 100 messages; it does not search full history. Returns { matches: [...] } with id, author, content, ${embedsReturned}, timestamp. Use discord_read_messages to fetch recent messages without filtering.`,
+    description: `Keyword search over a channel's recent messages using case-insensitive substring matching against message content, embed text and the content a forward carries. Scans only up to the last 100 messages; it does not search full history. Returns { matches: [...] } with id, author, content, ${embedsReturned}, timestamp. Use discord_read_messages to fetch recent messages without filtering.`,
     annotations: { title: "Search messages", readOnlyHint: true, openWorldHint: true },
     schema: z.object({
       channel_id: snowflake.describe("ID (snowflake) of the channel or thread to search."),
       keyword: z
         .string()
         .describe(
-          "Case-insensitive substring to match within message content or embed text (title, description, author, fields, footer).",
+          "Case-insensitive substring to match within message content, embed text (title, description, author, fields, footer), or the content and embeds a message forwards.",
         ),
       limit: intIn(1, MAX_FETCH_LIMIT)
         .default(MAX_FETCH_LIMIT)
@@ -611,9 +611,7 @@ const tools = [
       const needle = keyword.toLowerCase();
       const matches = [...messages.values()]
         .filter((m) =>
-          [m.content, ...m.embeds.map((e) => embedText(e.data))].some((text) =>
-            text.toLowerCase().includes(needle),
-          ),
+          messageTexts(textSourceOfMessage(m)).some((text) => text.toLowerCase().includes(needle)),
         )
         .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
         .map((m) => ({

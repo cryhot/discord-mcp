@@ -37,6 +37,7 @@ function botMessage(embed: Record<string, unknown>) {
     createdAt,
     createdTimestamp: createdAt.getTime(),
     attachments: { size: 0 },
+    messageSnapshots: new Map(),
     pinned: false,
   };
 }
