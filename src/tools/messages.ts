@@ -5,11 +5,12 @@ import {
   PrivateThreadChannel,
   Message,
   MessageReaction,
+  type Guild,
   type MessagePin,
+  type RESTGetAPIGuildMessagesSearchResult,
   Routes,
   SnowflakeUtil,
   DiscordAPIError,
-  APIEmbed,
 } from "discord.js";
 import { z } from "zod";
 import { discord, getTextChannel, fetchChannelChecked } from "../client.js";
@@ -22,6 +23,7 @@ import {
   summarizeEmbed,
   embedText,
 } from "../embeds.js";
+import { hasField } from "../messageFilters.js";
 import { defineModule, defineTool, snowflake, guildId, intIn, structured } from "./define.js";
 
 const channelId = snowflake.describe("ID (snowflake) of the channel or thread.");
@@ -120,6 +122,48 @@ function findReaction(msg: Message, emoji: string): MessageReaction | undefined 
 const PINS_PAGE_SIZE = 50;
 /** Upper bound on pin pages walked per call, so a cursor that stops advancing cannot loop forever. */
 const MAX_PIN_PAGES = 20;
+
+type GuildSearchResult = Extract<RESTGetAPIGuildMessagesSearchResult, { messages: unknown }>;
+
+/** One request to Discord's search endpoint for a server. */
+async function requestGuildSearch(
+  guildId: string,
+  params: URLSearchParams,
+): Promise<GuildSearchResult> {
+  const data = (await discord.rest.get(Routes.guildMessagesSearch(guildId), {
+    query: params,
+  })) as RESTGetAPIGuildMessagesSearchResult;
+  // Discord answers 202 with an index-not-ready body that carries no `messages`
+  // key while it builds the guild's search index.
+  if (!("messages" in data))
+    throw new Error(
+      `Discord is still building this server's message search index. Retry in ${Math.ceil(data.retry_after ?? 5)}s.`,
+    );
+  return data;
+}
+
+/** Thread and forum-post hits name their channel in the response's `threads`. */
+function threadNames(data: GuildSearchResult): Map<string, string> {
+  return new Map((data.threads ?? []).map((t) => [t.id, t.name]));
+}
+
+/** A search hit, with the name of its channel: the thread names first, as those are rarely in the channel cache, which covers the rest. */
+function searchMatch(
+  m: GuildSearchResult["messages"][number][number],
+  names: Map<string, string>,
+  guild: Guild,
+) {
+  return {
+    id: m.id,
+    author: userTag(m.author),
+    content: m.content,
+    embeds: (m.embeds ?? []).map(summarizeEmbed),
+    timestamp: m.timestamp,
+    channel_id: m.channel_id,
+    channel_name:
+      names.get(m.channel_id) ?? guild.channels.cache.get(m.channel_id)?.name ?? "unknown",
+  };
+}
 
 /** Mirrors discord.js `User#tag`, which raw API users lack. Both "0" and "0000" mean migrated. */
 function userTag(user: { username: string; discriminator: string }): string {
@@ -584,16 +628,46 @@ const tools = [
   }),
   defineTool({
     name: "discord_search_guild_messages",
-    description: `Search for messages across all channels in a guild using Discord's native search API, which also indexes embed text. Returns { matches: [...] } with id, author, content, ${embedsReturned}, timestamp, channel_id, channel_name. Requires READ_MESSAGE_HISTORY permission. Use discord_search_messages for channel-specific search.`,
+    description: `Search a server's messages with Discord's native search index, across every channel and thread the bot can read. Age-restricted (NSFW) channels are excluded unless include_nsfw is true. Filter by text, channel, author, content type (has: link, embed, file, image, video, sound, sticker, poll, snapshot for forwards, or a '-' negation) and message-ID range (min_id/max_id); results are sorted by time (sort_order). Page with offset: re-call with offset + limit while it stays below total_results. Returns { total_results, matches: [...] } with id, author, content, ${embedsReturned}, timestamp, channel_id, channel_name. Requires the Read Message History permission. Use discord_search_messages for a quick scan of one channel's recent messages.`,
     annotations: { title: "Search guild messages", readOnlyHint: true, openWorldHint: true },
     schema: z.object({
       guild_id: guildId,
-      query: z.string().describe("Search query (case-insensitive)."),
+      query: z
+        .string()
+        .min(1)
+        .max(1024)
+        .optional()
+        .describe(
+          "Text to search for (case-insensitive, max 1024 characters). Optional when another filter such as has, author_id, or channel_id narrows the search.",
+        ),
       channel_id: snowflake.optional().describe("Optional. Restrict search to this channel ID."),
       author_id: snowflake.optional().describe("Optional. Only show messages from this user ID."),
+      has: hasField,
+      min_id: snowflake
+        .optional()
+        .describe("Only messages newer than this message ID (snowflake)."),
+      max_id: snowflake
+        .optional()
+        .describe("Only messages older than this message ID (snowflake)."),
+      sort_order: z
+        .enum(["desc", "asc"])
+        .optional()
+        .describe("Time order of the results: desc (Discord's default, newest first) or asc."),
+      include_nsfw: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Include results from age-restricted (NSFW) channels. Default false, which is Discord's default too.",
+        ),
+      offset: intIn(0, 9975)
+        .optional()
+        .describe(
+          "Number of results to skip, for paging (0-9975). Discord caps it at 9975, so narrow the search with min_id/max_id to reach hits past the first 10000.",
+        ),
       limit: intIn(1, 25).default(25).describe("Max messages to return (1–25). Default 25."),
     }),
     outputSchema: z.object({
+      total_results: z.number(),
       matches: z.array(
         messageSummary.extend({
           channel_id: z.string(),
@@ -601,51 +675,25 @@ const tools = [
         }),
       ),
     }),
-    handle: async ({ guild_id, query, channel_id, author_id, limit }) => {
-      const searchParams: Record<string, string> = { content: query, limit: String(limit) };
-      if (channel_id) searchParams.channel_id = channel_id;
-      if (author_id) searchParams.author_id = author_id;
+    handle: async (args) => {
+      const { guild_id, query, channel_id, author_id, has, min_id, max_id } = args;
+      const params = new URLSearchParams({ limit: String(args.limit) });
+      if (query !== undefined) params.set("content", query);
+      if (channel_id) params.set("channel_id", channel_id);
+      if (author_id) params.set("author_id", author_id);
+      for (const type of has ?? []) params.append("has", type);
+      if (min_id) params.set("min_id", min_id);
+      if (max_id) params.set("max_id", max_id);
+      if (args.sort_order) params.set("sort_order", args.sort_order);
+      if (args.include_nsfw) params.set("include_nsfw", "true");
+      if (args.offset !== undefined) params.set("offset", String(args.offset));
 
-      const searchUrlParams = new URLSearchParams(searchParams);
-      const result = await discord.rest.get(Routes.guildMessagesSearch(guild_id), {
-        query: searchUrlParams,
-      });
-
-      const data = result as {
-        messages?: Array<
-          Array<{
-            id: string;
-            content: string;
-            embeds?: APIEmbed[];
-            timestamp: string;
-            channel_id: string;
-            author: { username: string; discriminator: string };
-          }>
-        >;
-        retry_after?: number;
-      };
-      // Discord answers 202 with an index-not-ready body that carries no `messages`
-      // key while it builds the guild's search index.
-      if (!data.messages)
-        throw new Error(
-          `Discord is still building this server's message search index. Retry in ${Math.ceil(data.retry_after ?? 5)}s.`,
-        );
-      const matches = data.messages.flat().map((m) => ({
-        id: m.id,
-        author: userTag(m.author),
-        content: m.content,
-        embeds: (m.embeds ?? []).map(summarizeEmbed),
-        timestamp: m.timestamp,
-        channel_id: m.channel_id,
-        channel_name: "",
-      }));
-
+      const data = await requestGuildSearch(guild_id, params);
+      const names = threadNames(data);
       const guild = await discord.guilds.fetch(guild_id);
-      for (const match of matches) {
-        match.channel_name = guild.channels.cache.get(match.channel_id)?.name ?? "unknown";
-      }
+      const matches = data.messages.flat().map((m) => searchMatch(m, names, guild));
 
-      return structured({ matches });
+      return structured({ total_results: data.total_results, matches });
     },
   }),
   defineTool({

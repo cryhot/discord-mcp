@@ -245,7 +245,7 @@ Data access is governed by the **portal toggles**, not by these flags: this serv
 | `discord_get_message_attachments` | List a message's attachments with download urls             |
 | `discord_fetch_pinned_messages`   | List all pinned messages in a channel                       |
 | `discord_search_messages`         | Search messages by keyword (last 100)                       |
-| `discord_search_guild_messages`   | Search across every channel using Discord's search index    |
+| `discord_search_guild_messages`   | Search a server via Discord's index (filters and paging)    |
 | `discord_crosspost_message`       | Publish a message to announcement channel followers         |
 | `discord_forward_message`         | Forward a message to another channel                        |
 

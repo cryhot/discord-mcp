@@ -128,6 +128,7 @@ test("search_messages matches a keyword that only appears inside an embed", asyn
 
 test("search_guild_messages maps raw REST embeds", async () => {
   mock.method(discord.rest, "get", async () => ({
+    total_results: 1,
     messages: [
       [
         {
