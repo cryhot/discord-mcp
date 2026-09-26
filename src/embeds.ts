@@ -1,4 +1,4 @@
-import { EmbedBuilder, ColorResolvable } from "discord.js";
+import { EmbedBuilder, ColorResolvable, APIEmbed } from "discord.js";
 import { z } from "zod";
 import { httpUrl } from "./tools/define.js";
 
@@ -82,4 +82,68 @@ export function buildEmbed(args: EmbedInput): EmbedBuilder {
     );
   }
   return embed;
+}
+
+/**
+ * Read-side shape of an embed, returned by the message read tools. Mirrors the input
+ * fields above (author and footer flattened to their text, images to their URL), and
+ * omits absent parts so channels full of bot embeds stay compact.
+ */
+export const embedSummary = z.object({
+  title: z.string().optional(),
+  url: z.string().optional(),
+  description: z.string().optional(),
+  color: z.string().optional(),
+  author: z.string().optional(),
+  fields: z
+    .array(z.object({ name: z.string(), value: z.string(), inline: z.boolean() }))
+    .optional(),
+  footer: z.string().optional(),
+  image_url: z.string().optional(),
+  thumbnail_url: z.string().optional(),
+  timestamp: z.string().optional(),
+});
+
+export type EmbedSummary = z.infer<typeof embedSummary>;
+
+/**
+ * Flattens a raw API embed into an `embedSummary`. Takes the REST payload shape, so it
+ * serves both discord.js messages (`Embed#data`) and raw search results.
+ */
+export function summarizeEmbed(e: Readonly<APIEmbed>): EmbedSummary {
+  return {
+    title: e.title,
+    url: e.url,
+    description: e.description,
+    color: e.color === undefined ? undefined : `#${e.color.toString(16).padStart(6, "0")}`,
+    author: e.author?.name,
+    fields: e.fields?.length
+      ? e.fields.map((f) => ({ name: f.name, value: f.value, inline: f.inline ?? false }))
+      : undefined,
+    footer: e.footer?.text,
+    image_url: e.image?.url,
+    thumbnail_url: e.thumbnail?.url,
+    timestamp: e.timestamp,
+  };
+}
+
+/**
+ * The text an author wrote in an embed, one string per part. Discord also builds embeds for
+ * the links in a message (types link, article, image, video, gifv): they only repeat what
+ * the link points to, so they give no text.
+ */
+export function embedTexts(e: Readonly<APIEmbed>): string[] {
+  if (e.type !== undefined && e.type !== "rich") return [];
+  return [
+    e.title,
+    e.description,
+    e.author?.name,
+    ...(e.fields ?? []).flatMap((f) => [f.name, f.value]),
+    e.footer?.text,
+  ].filter((part): part is string => part !== undefined && part !== "");
+}
+
+/** The human-readable text of an embed, for keyword matching against bot messages. */
+export function embedText(e: Readonly<APIEmbed>): string {
+  return embedTexts(e).join("\n");
 }

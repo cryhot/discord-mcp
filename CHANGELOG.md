@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `discord_read_messages`, `discord_search_messages`, `discord_search_guild_messages` and `discord_fetch_pinned_messages` return each message's embeds (title, url, description, color, author, fields, footer, image and thumbnail urls, timestamp). Bots such as suggestion, ticket and log bots usually leave `content` empty and put all their text in embeds, which these tools previously dropped, so bot messages read as blank
+- `discord_search_messages` matches its keyword against embed text as well as message content
+
 ## [2.2.0] - 2026-09-03
 
 ### Added

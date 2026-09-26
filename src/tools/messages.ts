@@ -8,11 +8,19 @@ import {
   Routes,
   SnowflakeUtil,
   DiscordAPIError,
+  APIEmbed,
 } from "discord.js";
 import { z } from "zod";
 import { discord, getTextChannel, fetchChannelChecked } from "../client.js";
 import { MAX_FETCH_LIMIT, DEFAULTS, AUTO_ARCHIVE_DURATIONS } from "../constants.js";
-import { buildEmbed, embedFieldsShape, embedArraySchema } from "../embeds.js";
+import {
+  buildEmbed,
+  embedFieldsShape,
+  embedArraySchema,
+  embedSummary,
+  summarizeEmbed,
+  embedText,
+} from "../embeds.js";
 import { defineModule, defineTool, snowflake, guildId, intIn, structured } from "./define.js";
 
 const channelId = snowflake.describe("ID (snowflake) of the channel or thread.");
@@ -67,12 +75,17 @@ function cursorForInstant(iso: string): string {
   return SnowflakeUtil.generate({ timestamp }).toString();
 }
 
+/** Bot messages often carry all their text in embeds and leave `content` empty. */
 const messageSummary = z.object({
   id: z.string(),
   author: z.string(),
   content: z.string(),
+  embeds: z.array(embedSummary),
   timestamp: z.string(),
 });
+
+const embedsReturned =
+  "embeds (title, url, description, color, author, fields, footer, image and thumbnail urls, timestamp; bots often leave content empty and put everything here)";
 
 const attachmentSummary = z.object({
   id: z.string(),
@@ -113,8 +126,7 @@ function userTag(user: { username: string; discriminator: string }): string {
 const tools = [
   defineTool({
     name: "discord_read_messages",
-    description:
-      "Read messages from a text channel or thread, oldest-to-newest. Page backwards by re-calling with before set to the id of the oldest message you received, which walks a channel past the 100-message per-call cap. Requires the View Channel and Read Message History permissions. Returns { messages: [...] } with id, author, content, timestamp, attachment count, pinned flag. Use discord_search_messages to filter by keyword, or discord_fetch_pinned_messages for pinned messages only.",
+    description: `Read messages from a text channel or thread, oldest-to-newest. Page backwards by re-calling with before set to the id of the oldest message you received, which walks a channel past the 100-message per-call cap. Requires the View Channel and Read Message History permissions. Returns { messages: [...] } with id, author, content, ${embedsReturned}, timestamp, attachment count, pinned flag. Use discord_search_messages to filter by keyword, or discord_fetch_pinned_messages for pinned messages only.`,
     annotations: { title: "Read messages", readOnlyHint: true, openWorldHint: true },
     schema: z
       .object({
@@ -150,6 +162,7 @@ const tools = [
           id: m.id,
           author: m.author.tag,
           content: m.content,
+          embeds: m.embeds.map((e) => summarizeEmbed(e.data)),
           timestamp: m.createdAt.toISOString(),
           attachments: m.attachments.size,
           pinned: m.pinned,
@@ -528,12 +541,15 @@ const tools = [
   }),
   defineTool({
     name: "discord_search_messages",
-    description:
-      "Keyword search over a channel's recent messages using case-insensitive substring matching. Scans only up to the last 100 messages; it does not search full history. Returns { matches: [...] } with id, author, content, timestamp. Use discord_read_messages to fetch recent messages without filtering.",
+    description: `Keyword search over a channel's recent messages using case-insensitive substring matching against message content and embed text. Scans only up to the last 100 messages; it does not search full history. Returns { matches: [...] } with id, author, content, ${embedsReturned}, timestamp. Use discord_read_messages to fetch recent messages without filtering.`,
     annotations: { title: "Search messages", readOnlyHint: true, openWorldHint: true },
     schema: z.object({
       channel_id: snowflake.describe("ID (snowflake) of the channel or thread to search."),
-      keyword: z.string().describe("Case-insensitive substring to match within message content."),
+      keyword: z
+        .string()
+        .describe(
+          "Case-insensitive substring to match within message content or embed text (title, description, author, fields, footer).",
+        ),
       limit: intIn(1, MAX_FETCH_LIMIT)
         .default(MAX_FETCH_LIMIT)
         .describe("Max number of recent messages to scan (1–100). Default 100."),
@@ -544,12 +560,17 @@ const tools = [
       const messages = await channel.messages.fetch({ limit, cache: false });
       const needle = keyword.toLowerCase();
       const matches = [...messages.values()]
-        .filter((m) => m.content.toLowerCase().includes(needle))
+        .filter((m) =>
+          [m.content, ...m.embeds.map((e) => embedText(e.data))].some((text) =>
+            text.toLowerCase().includes(needle),
+          ),
+        )
         .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
         .map((m) => ({
           id: m.id,
           author: m.author.tag,
           content: m.content,
+          embeds: m.embeds.map((e) => summarizeEmbed(e.data)),
           timestamp: m.createdAt.toISOString(),
         }));
       return structured({ matches });
@@ -557,8 +578,7 @@ const tools = [
   }),
   defineTool({
     name: "discord_search_guild_messages",
-    description:
-      "Search for messages across all channels in a guild using Discord's native search API. Returns messages matching the query with channel context. Requires READ_MESSAGE_HISTORY permission. Use discord_search_messages for channel-specific search.",
+    description: `Search for messages across all channels in a guild using Discord's native search API, which also indexes embed text. Returns { matches: [...] } with id, author, content, ${embedsReturned}, timestamp, channel_id, channel_name. Requires READ_MESSAGE_HISTORY permission. Use discord_search_messages for channel-specific search.`,
     annotations: { title: "Search guild messages", readOnlyHint: true, openWorldHint: true },
     schema: z.object({
       guild_id: guildId,
@@ -590,6 +610,7 @@ const tools = [
           Array<{
             id: string;
             content: string;
+            embeds?: APIEmbed[];
             timestamp: string;
             channel_id: string;
             author: { username: string; discriminator: string };
@@ -607,6 +628,7 @@ const tools = [
         id: m.id,
         author: userTag(m.author),
         content: m.content,
+        embeds: (m.embeds ?? []).map(summarizeEmbed),
         timestamp: m.timestamp,
         channel_id: m.channel_id,
         channel_name: "",
@@ -798,8 +820,7 @@ const tools = [
   }),
   defineTool({
     name: "discord_fetch_pinned_messages",
-    description:
-      "List all pinned messages in a channel. Returns { messages: [...] } with id, author, content, timestamp, pinnedAt. Read-only. Use discord_pin_message to change which messages are pinned.",
+    description: `List all pinned messages in a channel. Returns { messages: [...] } with id, author, content, ${embedsReturned}, timestamp, pinnedAt. Read-only. Use discord_pin_message to change which messages are pinned.`,
     annotations: { title: "Fetch pinned messages", readOnlyHint: true, openWorldHint: true },
     schema: z.object({
       channel_id: snowflake.describe("ID (snowflake) of the channel or thread to list pins from."),
@@ -814,6 +835,7 @@ const tools = [
         id: m.id,
         author: m.author.tag,
         content: m.content,
+        embeds: m.embeds.map((e) => summarizeEmbed(e.data)),
         timestamp: m.createdAt.toISOString(),
         pinnedAt: pinnedAt.toISOString(),
       }));
