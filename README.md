@@ -213,9 +213,9 @@ Data access is governed by the **portal toggles**, not by these flags: this serv
 
 ---
 
-## Available Tools (99)
+## Available Tools (100)
 
-### Discovery & Navigation (4 tools)
+### Discovery & Navigation (5 tools)
 
 | Tool                           | Description                                                      |
 | ------------------------------ | ---------------------------------------------------------------- |
@@ -223,6 +223,7 @@ Data access is governed by the **portal toggles**, not by these flags: this serv
 | `discord_get_guild_info`       | Get detailed guild info (name, members, channels, roles, boosts) |
 | `discord_list_channels`        | List all channels in a guild grouped by category                 |
 | `discord_find_channel_by_name` | Find a channel by name (partial match)                           |
+| `discord_list_emojis`          | List a server's custom emojis, with the text to use them         |
 
 ### Messages (20 tools)
 

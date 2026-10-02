@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `discord_list_emojis` lists a server's custom emojis: id, name, whether each is animated, available or managed, the roles that may use it, and two ready-to-use forms, `mention` for a message (`<:name:id>`, or `<a:name:id>` when animated) and `reaction` (`name:id`) for `discord_add_reaction` and `discord_create_poll`. An optional `name` narrows the list to the emojis whose name contains it. No tool exposed emoji ids before.
+
 ## [2.2.0] - 2026-09-03
 
 ### Added

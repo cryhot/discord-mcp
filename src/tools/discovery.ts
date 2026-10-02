@@ -16,6 +16,17 @@ const channelSummary = z.object({
   type: z.string(),
 });
 
+const emojiSummary = z.object({
+  id: z.string(),
+  name: z.string().nullable(),
+  animated: z.boolean(),
+  available: z.boolean(),
+  managed: z.boolean(),
+  roleIds: z.array(z.string()),
+  mention: z.string(),
+  reaction: z.string(),
+});
+
 /** Tool definitions for server/guild discovery and channel navigation. */
 const tools = [
   defineTool({
@@ -125,6 +136,38 @@ const tools = [
         .filter((c) => c.name.toLowerCase().includes(keyword))
         .map((c) => ({ id: c.id, name: c.name, type: ChannelType[c.type] }));
       return structured({ matches });
+    },
+  }),
+  defineTool({
+    name: "discord_list_emojis",
+    description:
+      "List the custom emojis of a server (id, name, animated, available, managed, roles allowed to use it), optionally narrowed to names containing a substring. Read-only. Each entry carries `mention`, the text to write in a message (`<:name:id>`, or `<a:name:id>` when animated), and `reaction`, the `name:id` form that discord_add_reaction and discord_create_poll accept. An emoji with `available: false` cannot be used until the server regains boost levels; one with `roleIds` is usable only by members holding one of those roles. Unicode emojis are not listed: write them as they are.",
+    annotations: { title: "List server emojis", readOnlyHint: true, openWorldHint: true },
+    schema: z.object({
+      guild_id: guildId,
+      name: z
+        .string()
+        .optional()
+        .describe("Case-insensitive substring to match against emoji names. Default: all."),
+    }),
+    outputSchema: z.object({ emojis: z.array(emojiSummary) }),
+    handle: async ({ guild_id, name }) => {
+      const guild = await discord.guilds.fetch(guild_id);
+      const fetched = await guild.emojis.fetch();
+      const keyword = name?.toLowerCase();
+      const emojis = fetched
+        .filter((e) => keyword === undefined || (e.name ?? "").toLowerCase().includes(keyword))
+        .map((e) => ({
+          id: e.id,
+          name: e.name,
+          animated: e.animated ?? false,
+          available: e.available ?? true,
+          managed: e.managed ?? false,
+          roleIds: [...e.roles.cache.keys()],
+          mention: e.toString(),
+          reaction: `${e.name}:${e.id}`,
+        }));
+      return structured({ emojis });
     },
   }),
 ];
