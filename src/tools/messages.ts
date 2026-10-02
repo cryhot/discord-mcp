@@ -213,6 +213,30 @@ const tools = [
     },
   }),
   defineTool({
+    name: "discord_send_typing",
+    description:
+      'Show the bot\'s "is typing…" indicator in a channel or thread. Discord clears it after about 10 seconds, or as soon as the bot posts a message there, and offers no way to stop it earlier: call again every 8 seconds or so to keep it going during a slow task, then send the actual message. Use it only to signal work in progress; it posts nothing. Requires the Send Messages permission. Returns a confirmation.',
+    annotations: {
+      title: "Show typing indicator",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    schema: z.object({
+      channel_id: channelId.describe("ID (snowflake) of the channel or thread to type in."),
+    }),
+    handle: async ({ channel_id }) => {
+      const channel = await getTextChannel(channel_id);
+      await channel.sendTyping();
+      return {
+        content: [
+          { type: "text", text: `✅ Typing indicator shown in #${channel.name} for ~10s.` },
+        ],
+      };
+    },
+  }),
+  defineTool({
     name: "discord_edit_message",
     description:
       "Edit the text content of a message previously sent by this bot. Discord forbids editing other users' messages, so this fails for non-bot messages. Use discord_edit_embed for embed messages. Works in text channels and threads. Returns the edited message ID.",

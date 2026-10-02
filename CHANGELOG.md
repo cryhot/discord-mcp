@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `discord_send_typing` shows the bot's "is typing…" indicator in a channel or thread. Discord clears it after about 10 seconds, or as soon as the bot posts there, and offers no way to stop it earlier, so a long task calls the tool again every 8 seconds or so. It posts nothing and needs the Send Messages permission.
+
 ## [2.2.0] - 2026-09-03
 
 ### Added

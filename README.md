@@ -213,7 +213,7 @@ Data access is governed by the **portal toggles**, not by these flags: this serv
 
 ---
 
-## Available Tools (99)
+## Available Tools (100)
 
 ### Discovery & Navigation (4 tools)
 
@@ -224,13 +224,14 @@ Data access is governed by the **portal toggles**, not by these flags: this serv
 | `discord_list_channels`        | List all channels in a guild grouped by category                 |
 | `discord_find_channel_by_name` | Find a channel by name (partial match)                           |
 
-### Messages (20 tools)
+### Messages (21 tools)
 
 | Tool                              | Description                                              |
 | --------------------------------- | -------------------------------------------------------- |
 | `discord_read_messages`           | Read messages, paging back through history               |
 | `discord_send_message`            | Send a plain text message                                |
 | `discord_reply_message`           | Reply to a specific message                              |
+| `discord_send_typing`             | Show the "is typing…" indicator in a channel             |
 | `discord_edit_message`            | Edit a message sent by the bot                           |
 | `discord_delete_message`          | Delete a specific message                                |
 | `discord_add_reaction`            | Add a reaction emoji to a message                        |
