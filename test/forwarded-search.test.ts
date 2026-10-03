@@ -21,6 +21,8 @@ function fakeMessage(id: string, offsetMs: number, content: string, snapshots: u
     createdTimestamp,
     createdAt: new Date(createdTimestamp),
     attachments: new Collection(),
+    stickers: new Collection(),
+    poll: null,
     embeds: [],
     pinned: false,
     messageSnapshots: new Collection(

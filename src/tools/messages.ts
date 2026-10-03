@@ -13,6 +13,7 @@ import {
   DiscordAPIError,
 } from "discord.js";
 import { z } from "zod";
+import { scanChannel } from "../channelScan.js";
 import { discord, getTextChannel, fetchChannelChecked } from "../client.js";
 import { MAX_FETCH_LIMIT, DEFAULTS, AUTO_ARCHIVE_DURATIONS } from "../constants.js";
 import {
@@ -22,8 +23,16 @@ import {
   embedSummary,
   summarizeEmbed,
 } from "../embeds.js";
-import { hasField } from "../messageFilters.js";
-import { messageTexts, textSourceOfMessage } from "../messageText.js";
+import {
+  MessageFilter,
+  RoleLookup,
+  messageFilterShape,
+  oneOrMany,
+  targetOfMessage,
+  targetOfRaw,
+  toList,
+  type RawFilterable,
+} from "../messageFilters.js";
 import { defineModule, defineTool, snowflake, guildId, intIn, structured } from "./define.js";
 
 const channelId = snowflake.describe("ID (snowflake) of the channel or thread.");
@@ -41,7 +50,7 @@ const afterCursor = snowflake.describe(
   "Return only messages newer than this message ID (snowflake). Page forwards by passing the id of the newest message from the previous call.",
 );
 const aroundCursor = snowflake.describe(
-  "Return messages centered on this message ID (snowflake): Discord splits `limit` either side of it, and an even `limit` puts the extra message on the newer side. Use it to read outward from a known message, such as a discord_search_guild_messages hit.",
+  "Return messages centered on this message ID (snowflake): Discord splits `limit` either side of it, and an even `limit` puts the extra message on the newer side. Use it to read outward from a known message, such as a discord_search_guild_messages hit. With filters, it looks at limit_search messages around it and keeps the `limit` matches nearest to it.",
 );
 const sinceInstant = z
   .union([z.iso.date(), z.iso.datetime({ offset: true })], {
@@ -172,53 +181,98 @@ function userTag(user: { username: string; discriminator: string }): string {
     : `${user.username}#${user.discriminator}`;
 }
 
+/** Most messages one channel search may look at, so that a single call stays a few pages long. */
+const MAX_SEARCH_SCAN = 1000;
+
+/** Discord serves search results 25 at a time, and nothing past this offset. */
+const MAX_SEARCH_PAGE = 25;
+const MAX_SEARCH_OFFSET = 9975;
+
+const channelMessage = messageSummary.extend({ attachments: z.number(), pinned: z.boolean() });
+
+/** Parameters of discord_search_messages, which discord_read_messages shares. */
+const channelSearchSchema = z
+  .object({
+    channel_id: snowflake.describe("ID (snowflake) of the channel or thread to search."),
+    ...messageFilterShape,
+    limit: intIn(1, MAX_FETCH_LIMIT)
+      .default(DEFAULTS.MESSAGES)
+      .describe(
+        "Max messages to return (1–100). Default 20. Walking back, the newest matches are kept; walking forward (after, since), the oldest.",
+      ),
+    limit_search: intIn(1, MAX_SEARCH_SCAN)
+      .default(MAX_FETCH_LIMIT)
+      .describe(
+        "Max messages to look at, matching or not (1–1000). Default 100. Raise it to search deeper into history: it is read 100 at a time, so a high value means several calls to Discord. Ignored when it is below limit.",
+      ),
+    before: beforeCursor.optional(),
+    after: afterCursor.optional(),
+    around: aroundCursor.optional(),
+    since: sinceInstant.optional(),
+  })
+  .refine(
+    hasSingleCursor,
+    "Pass at most one of before, after, around, or since: Discord treats before/after/around as mutually exclusive, and since is a form of after.",
+  );
+
+const channelSearchPaging = {
+  hasMore: z
+    .boolean()
+    .describe(
+      "Whether more history is left to look through after the messages that were looked at.",
+    ),
+  nextBefore: z.string().optional().describe("Pass as before to carry on walking back."),
+  nextAfter: z.string().optional().describe("Pass as after to carry on walking forward."),
+};
+
+async function searchChannel(args: z.infer<typeof channelSearchSchema>) {
+  const channel = await getTextChannel(args.channel_id);
+  const after = args.after ?? (args.since === undefined ? undefined : cursorForInstant(args.since));
+  const { messages, hasMore, nextBefore, nextAfter } = await scanChannel(
+    channel,
+    new MessageFilter(args),
+    {
+      limit: args.limit,
+      limitSearch: args.limit_search,
+      before: args.before,
+      after,
+      around: args.around,
+    },
+  );
+  return {
+    messages: messages.map((m) => ({
+      id: m.id,
+      author: m.author.tag,
+      content: m.content,
+      timestamp: m.createdAt.toISOString(),
+      embeds: m.embeds.map((e) => summarizeEmbed(e.data)),
+      attachments: m.attachments.size,
+      pinned: m.pinned,
+    })),
+    hasMore,
+    ...(nextBefore ? { nextBefore } : {}),
+    ...(nextAfter ? { nextAfter } : {}),
+  };
+}
+
+/** What the filters of the search tools do, said once. */
+const FILTERS_DOC =
+  "Filters (keyword, regex, author_id, role_id, has) take one value or a list: a message is kept when it passes every filter given, and, within one filter, when it matches any of its values. Text filters read what the author wrote: the content, embeds they wrote (not link previews), polls and forwarded messages, but not the message a reply answers.";
+
+/** Fields every message of a search result carries. */
+const MESSAGE_FIELDS_DOC = `Each message has id, author, content, ${embedsReturned}, timestamp, attachments (count) and pinned.`;
+
 /** Tool definitions for channel and thread messages. */
 const tools = [
   defineTool({
     name: "discord_read_messages",
-    description: `Read messages from a text channel or thread, oldest-to-newest. Page backwards by re-calling with before set to the id of the oldest message you received, which walks a channel past the 100-message per-call cap. Requires the View Channel and Read Message History permissions. Returns { messages: [...] } with id, author, content, ${embedsReturned}, timestamp, attachment count, pinned flag. Use discord_search_messages to filter by keyword, or discord_fetch_pinned_messages for pinned messages only.`,
-    annotations: { title: "Read messages", readOnlyHint: true, openWorldHint: true },
-    schema: z
-      .object({
-        channel_id: snowflake.describe("ID (snowflake) of the channel or thread to read from."),
-        limit: intIn(1, MAX_FETCH_LIMIT)
-          .default(DEFAULTS.MESSAGES)
-          .describe("How many messages to fetch per call (1–100). Default 20."),
-        before: beforeCursor.optional(),
-        after: afterCursor.optional(),
-        around: aroundCursor.optional(),
-        since: sinceInstant.optional(),
-      })
-      .refine(
-        hasSingleCursor,
-        "Pass at most one of before, after, around, or since: Discord treats before/after/around as mutually exclusive, and since is a form of after.",
-      ),
-    outputSchema: z.object({
-      messages: z.array(messageSummary.extend({ attachments: z.number(), pinned: z.boolean() })),
-    }),
-    handle: async ({ channel_id, limit, before, after, around, since }) => {
-      const channel = await getTextChannel(channel_id);
-      const resolvedAfter = after ?? (since === undefined ? undefined : cursorForInstant(since));
-      const messages = await channel.messages.fetch({
-        limit,
-        cache: false,
-        before,
-        after: resolvedAfter,
-        around,
-      });
-      const result = [...messages.values()]
-        .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-        .map((m) => ({
-          id: m.id,
-          author: m.author.tag,
-          content: m.content,
-          embeds: m.embeds.map((e) => summarizeEmbed(e.data)),
-          timestamp: m.createdAt.toISOString(),
-          attachments: m.attachments.size,
-          pinned: m.pinned,
-        }));
-      return structured({ messages: result });
-    },
+    description:
+      "Deprecated: an alias for discord_search_messages, which takes the same parameters and does the same, plus the filters. Reads messages from a text channel or thread, oldest-to-newest. Page backwards by re-calling with before set to nextBefore (or the id of the oldest message received). Requires the View Channel and Read Message History permissions. Returns { messages: [...], hasMore }. " +
+      MESSAGE_FIELDS_DOC,
+    annotations: { title: "Read messages (deprecated)", readOnlyHint: true, openWorldHint: true },
+    schema: channelSearchSchema,
+    outputSchema: z.object({ messages: z.array(channelMessage), ...channelSearchPaging }),
+    handle: async (args) => structured(await searchChannel(args)),
   }),
   defineTool({
     name: "discord_send_message",
@@ -591,42 +645,27 @@ const tools = [
   }),
   defineTool({
     name: "discord_search_messages",
-    description: `Keyword search over a channel's recent messages using case-insensitive substring matching against message content, embed text and the content a forward carries. Scans only up to the last 100 messages; it does not search full history. Returns { matches: [...] } with id, author, content, ${embedsReturned}, timestamp. Use discord_read_messages to fetch recent messages without filtering.`,
+    description:
+      "Read and search the messages of a text channel or thread. With no filter it reads the latest messages; with filters it walks the history and keeps those that match. " +
+      FILTERS_DOC +
+      " It looks at limit_search messages (100 by default) and returns up to limit matches, oldest-to-newest. When hasMore is true, carry on with before set to nextBefore (or after set to nextAfter when walking forward with after or since). For a whole server at once, with Discord's own index and no depth limit, use discord_search_guild_messages. Requires the View Channel and Read Message History permissions (and, for role_id, access to the server's members). Returns { matches: [...], hasMore }. " +
+      MESSAGE_FIELDS_DOC,
     annotations: { title: "Search messages", readOnlyHint: true, openWorldHint: true },
-    schema: z.object({
-      channel_id: snowflake.describe("ID (snowflake) of the channel or thread to search."),
-      keyword: z
-        .string()
-        .describe(
-          "Case-insensitive substring to match within message content, embed text (title, description, author, fields, footer), or the content and embeds a message forwards.",
-        ),
-      limit: intIn(1, MAX_FETCH_LIMIT)
-        .default(MAX_FETCH_LIMIT)
-        .describe("Max number of recent messages to scan (1–100). Default 100."),
-    }),
-    outputSchema: z.object({ matches: z.array(messageSummary) }),
-    handle: async ({ channel_id, keyword, limit }) => {
-      const channel = await getTextChannel(channel_id);
-      const messages = await channel.messages.fetch({ limit, cache: false });
-      const needle = keyword.toLowerCase();
-      const matches = [...messages.values()]
-        .filter((m) =>
-          messageTexts(textSourceOfMessage(m)).some((text) => text.toLowerCase().includes(needle)),
-        )
-        .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-        .map((m) => ({
-          id: m.id,
-          author: m.author.tag,
-          content: m.content,
-          embeds: m.embeds.map((e) => summarizeEmbed(e.data)),
-          timestamp: m.createdAt.toISOString(),
-        }));
-      return structured({ matches });
+    schema: channelSearchSchema,
+    outputSchema: z.object({ matches: z.array(channelMessage), ...channelSearchPaging }),
+    handle: async (args) => {
+      const { messages, ...paging } = await searchChannel(args);
+      return structured({ matches: messages, ...paging });
     },
   }),
   defineTool({
     name: "discord_search_guild_messages",
-    description: `Search a server's messages with Discord's native search index, across every channel and thread the bot can read. Age-restricted (NSFW) channels are excluded unless include_nsfw is true. Filter by text, channel, author, content type (has: link, embed, file, image, video, sound, sticker, poll, snapshot for forwards, or a '-' negation) and message-ID range (min_id/max_id); results are sorted by time (sort_order). Page with offset: re-call with offset + limit while it stays below total_results. Returns { total_results, matches: [...] } with id, author, content, ${embedsReturned}, timestamp, channel_id, channel_name. Requires the Read Message History permission. Use discord_search_messages for a quick scan of one channel's recent messages.`,
+    description:
+      "Search a server's messages with Discord's native search index, across every channel and thread the bot can read, with no limit on how far back it looks. Age-restricted (NSFW) channels are excluded unless include_nsfw is true. " +
+      FILTERS_DOC +
+      " Differences with discord_search_messages: keyword is a single text (Discord's index takes one) and also matches embed text; channel_id is accepted here; keyword, author_id, channel_id and has are applied by Discord, whereas regex and role_id are applied here to what Discord returned. limit is how many messages to return (1–100, fetched 25 at a time); limit_search only matters with regex or role_id, and is how many of Discord's results to look at, since a result that does not pass them is dropped. total_results is Discord's count before regex and role_id. When hasMore is true, carry on with offset set to nextOffset: Discord caps offset at 9975, so narrow the search with min_id and max_id to go past the first 10000 hits. Returns { total_results, matches: [...], hasMore }, each match also carrying channel_id and channel_name. " +
+      MESSAGE_FIELDS_DOC +
+      " Requires READ_MESSAGE_HISTORY. Use discord_search_messages to search one channel.",
     annotations: { title: "Search guild messages", readOnlyHint: true, openWorldHint: true },
     schema: z.object({
       guild_id: guildId,
@@ -635,12 +674,22 @@ const tools = [
         .min(1)
         .max(1024)
         .optional()
+        .describe("Deprecated: the former name of keyword."),
+      keyword: z
+        .string()
+        .min(1)
+        .max(1024)
+        .optional()
         .describe(
-          "Text to search for (case-insensitive, max 1024 characters). Optional when another filter such as has, author_id, or channel_id narrows the search.",
+          "Text to search for (case-insensitive, max 1024 characters). One keyword only. Optional when another filter such as has, author_id, or channel_id narrows the search.",
         ),
-      channel_id: snowflake.optional().describe("Optional. Restrict search to this channel ID."),
-      author_id: snowflake.optional().describe("Optional. Only show messages from this user ID."),
-      has: hasField,
+      channel_id: oneOrMany(snowflake)
+        .optional()
+        .describe("Only this channel or thread ID, or any of these."),
+      author_id: messageFilterShape.author_id,
+      regex: messageFilterShape.regex,
+      role_id: messageFilterShape.role_id,
+      has: messageFilterShape.has,
       min_id: snowflake
         .optional()
         .describe("Only messages newer than this message ID (snowflake)."),
@@ -660,9 +709,16 @@ const tools = [
       offset: intIn(0, 9975)
         .optional()
         .describe(
-          "Number of results to skip, for paging (0-9975). Discord caps it at 9975, so narrow the search with min_id/max_id to reach hits past the first 10000.",
+          "Number of results to skip, for paging (0-9975). Discord caps it at 9975, so narrow the search with min_id/max_id to reach hits past the first 10000. Use nextOffset from the previous call.",
         ),
-      limit: intIn(1, 25).default(25).describe("Max messages to return (1–25). Default 25."),
+      limit: intIn(1, MAX_FETCH_LIMIT)
+        .default(25)
+        .describe("Max messages to return (1–100). Default 25."),
+      limit_search: intIn(1, MAX_SEARCH_SCAN)
+        .default(MAX_FETCH_LIMIT)
+        .describe(
+          "Max results of Discord to look at when regex or role_id drop some (1–1000). Default 100. Ignored without them, and when it is below limit.",
+        ),
     }),
     outputSchema: z.object({
       total_results: z.number(),
@@ -672,26 +728,65 @@ const tools = [
           channel_name: z.string(),
         }),
       ),
+      hasMore: z.boolean().describe("Whether Discord has results left after the ones looked at."),
+      nextOffset: z.number().optional().describe("Pass as offset to carry on."),
     }),
     handle: async (args) => {
       const { guild_id, query, channel_id, author_id, has, min_id, max_id } = args;
+      if (args.keyword !== undefined && query !== undefined && args.keyword !== query)
+        throw new Error("Pass keyword, not both keyword and its former name query.");
+      const keyword = args.keyword ?? query;
       const params = new URLSearchParams({ limit: String(args.limit) });
-      if (query !== undefined) params.set("content", query);
-      if (channel_id) params.set("channel_id", channel_id);
-      if (author_id) params.set("author_id", author_id);
-      for (const type of has ?? []) params.append("has", type);
+      if (keyword !== undefined) params.set("content", keyword);
+      for (const id of toList(channel_id)) params.append("channel_id", id);
+      for (const id of toList(author_id)) params.append("author_id", id);
+      for (const type of toList(has)) params.append("has", type);
       if (min_id) params.set("min_id", min_id);
       if (max_id) params.set("max_id", max_id);
       if (args.sort_order) params.set("sort_order", args.sort_order);
       if (args.include_nsfw) params.set("include_nsfw", "true");
       if (args.offset !== undefined) params.set("offset", String(args.offset));
 
-      const data = await requestGuildSearch(guild_id, params);
-      const names = threadNames(data);
+      // Discord applies keyword, author_id, channel_id and has; regex and role_id are applied
+      // here, so a result that does not pass them is dropped and more are looked at.
+      const local = new MessageFilter({ regex: args.regex, role_id: args.role_id });
       const guild = await discord.guilds.fetch(guild_id);
-      const matches = data.messages.flat().map((m) => searchMatch(m, names, guild));
+      const roles = local.needsRoles ? new RoleLookup(guild) : undefined;
+      const budget = local.isEmpty ? args.limit : Math.max(args.limit_search, args.limit);
+      const names = new Map<string, string>();
+      const matches: ReturnType<typeof searchMatch>[] = [];
+      let offset = args.offset ?? 0;
+      let total: number;
+      let looked = 0;
+      walk: for (;;) {
+        const size = Math.min(MAX_SEARCH_PAGE, budget - looked);
+        const page = new URLSearchParams(params);
+        page.set("limit", String(size));
+        if (offset > 0) page.set("offset", String(offset));
+        const data = await requestGuildSearch(guild_id, page);
+        total = data.total_results;
+        for (const [id, name] of threadNames(data)) names.set(id, name);
+        const hits = data.messages.flat();
+        for (const m of hits) {
+          looked += 1;
+          offset += 1;
+          const passes =
+            (local.isEmpty || local.matches(targetOfRaw(m as RawFilterable))) &&
+            (roles === undefined || local.hasRole(await roles.rolesOf(m.author.id)));
+          if (passes) matches.push(searchMatch(m, names, guild));
+          if (matches.length >= args.limit || looked >= budget) break walk;
+        }
+        // A short page, or the last offset Discord serves, is the end.
+        if (hits.length < size || offset > MAX_SEARCH_OFFSET) break;
+      }
 
-      return structured({ total_results: data.total_results, matches });
+      const hasMore = offset < total && offset <= MAX_SEARCH_OFFSET;
+      return structured({
+        total_results: total,
+        matches,
+        hasMore,
+        ...(hasMore ? { nextOffset: offset } : {}),
+      });
     },
   }),
   defineTool({
@@ -872,16 +967,19 @@ const tools = [
   }),
   defineTool({
     name: "discord_fetch_pinned_messages",
-    description: `List all pinned messages in a channel, most recently pinned first, following Discord's 50-per-request pin pages (up to 1000 pins). Returns { messages: [...] } with id, author, content, ${embedsReturned}, timestamp, pinnedAt. Read-only. Use discord_pin_message to change which messages are pinned.`,
+    description: `List all pinned messages in a channel, most recently pinned first, following Discord's 50-per-request pin pages (up to 1000 pins). They are all read first, then filtered. ${FILTERS_DOC} Returns { messages: [...] } with id, author, content, ${embedsReturned}, timestamp, pinnedAt. Read-only. Use discord_pin_message to change which messages are pinned.`,
     annotations: { title: "Fetch pinned messages", readOnlyHint: true, openWorldHint: true },
     schema: z.object({
       channel_id: snowflake.describe("ID (snowflake) of the channel or thread to list pins from."),
+      ...messageFilterShape,
     }),
     outputSchema: z.object({
       messages: z.array(messageSummary.extend({ pinnedAt: z.string() })),
     }),
-    handle: async ({ channel_id }) => {
-      const channel = await getTextChannel(channel_id);
+    handle: async (args) => {
+      const channel = await getTextChannel(args.channel_id);
+      const filter = new MessageFilter(args);
+      const roles = filter.needsRoles ? new RoleLookup(channel.guild) : undefined;
       // The pins endpoint pages at 50, newest pin first: walk back by pin time while it has more.
       const pins: MessagePin<true>[] = [];
       let before: Date | undefined;
@@ -896,14 +994,19 @@ const tools = [
         if (!hasMore || !oldest || oldest.getTime() === before?.getTime()) break;
         before = oldest;
       }
-      const result = pins.map(({ message: m, pinnedAt }) => ({
-        id: m.id,
-        author: m.author.tag,
-        content: m.content,
-        embeds: m.embeds.map((e) => summarizeEmbed(e.data)),
-        timestamp: m.createdAt.toISOString(),
-        pinnedAt: pinnedAt.toISOString(),
-      }));
+      const result = [];
+      for (const { message: m, pinnedAt } of pins) {
+        if (!filter.isEmpty && !filter.matches(targetOfMessage(m))) continue;
+        if (roles && !filter.hasRole(await roles.rolesOf(m.author.id))) continue;
+        result.push({
+          id: m.id,
+          author: m.author.tag,
+          content: m.content,
+          embeds: m.embeds.map((e) => summarizeEmbed(e.data)),
+          timestamp: m.createdAt.toISOString(),
+          pinnedAt: pinnedAt.toISOString(),
+        });
+      }
       return structured({ messages: result });
     },
   }),

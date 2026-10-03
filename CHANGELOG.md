@@ -6,6 +6,18 @@
 
 - `discord_read_messages`, `discord_search_messages`, `discord_search_guild_messages` and `discord_fetch_pinned_messages` return each message's embeds (title, url, description, color, author, fields, footer, image and thumbnail urls, timestamp). Bots such as suggestion, ticket and log bots usually leave `content` empty and put all their text in embeds, which these tools previously dropped, so bot messages read as blank
 - `discord_search_messages` matches its keyword against embed text as well as message content
+- `discord_search_messages` reads and searches a channel with filters, each one a value or a list: `keyword`, `regex` (JavaScript, case-insensitive), `author_id`, `role_id` (the roles the author holds now) and `has` (link, embed, file, image, video, sound, sticker, poll, snapshot; a leading `-` excludes). A message must pass every filter given and, within one filter, any of its values (for `has`, any of the plain values and all the `-` ones). The text filters read what the author wrote: the content, the embeds they wrote, polls and forwarded messages, not the message a reply answers. `limit` is how many matches to return and `limit_search` how many messages to look at (100 by default, 1000 at most, read 100 at a time), and the result carries `hasMore` with `nextBefore` or `nextAfter` to carry on, so a search reaches past the last 100 messages.
+- `discord_search_guild_messages` takes the same filters, plus `channel_id` as a list and a single `keyword` (Discord's index takes one text; `query` is still accepted), the same `limit` and `limit_search`, and returns `hasMore` with `nextOffset`. Discord applies `keyword`, `author_id`, `channel_id` and `has`; `regex` and `role_id` are applied on what Discord returned, so a result that does not pass is dropped and `total_results` stays Discord's own count. Its `has`, `min_id`, `max_id`, `sort_order`, `include_nsfw` and `offset` parameters and `total_results` are contributed by [@froquefy](https://github.com/froquefy).
+- `discord_fetch_pinned_messages` takes the same filters as `discord_search_messages`, applied to all the pins.
+- `discord_search_messages` matches a forward on the content and the embeds it carries: Discord keeps the original in the forward's snapshot and leaves the forward's own content empty, so a keyword that was in a forwarded message found nothing. Contributed by [@froquefy](https://github.com/froquefy).
+
+### Changed
+
+- `discord_read_messages` is deprecated: it is an alias of `discord_search_messages`, which takes the same parameters. In `discord_search_messages`, `limit` is now how many matches to return (20 by default) and the number of messages looked at is `limit_search`; `limit` used to be the number of messages scanned. The keyword search no longer matches the embeds Discord builds for the links of a message (types link, article, image, video, gifv), which only repeat what the link points to.
+
+### Fixed
+
+- `discord_fetch_pinned_messages` follows Discord's 50-per-request pin pages, up to 1000 pins, instead of stopping at the first page. Contributed by [@froquefy](https://github.com/froquefy).
 
 ## [2.2.0] - 2026-09-03
 

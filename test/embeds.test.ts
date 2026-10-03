@@ -31,12 +31,14 @@ function botMessage(embed: Record<string, unknown>) {
   const createdAt = new Date("2026-09-14T14:28:06.738Z");
   return {
     id: MESSAGE,
-    author: { tag: "Redstone Propozycje#2490" },
+    author: { tag: "Redstone Propozycje#2490", id: "999999999999999999" },
     content: "",
     embeds: [{ data: embed }],
     createdAt,
     createdTimestamp: createdAt.getTime(),
-    attachments: { size: 0 },
+    attachments: new Map(),
+    stickers: new Map(),
+    poll: null,
     messageSnapshots: new Map(),
     pinned: false,
   };

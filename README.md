@@ -226,28 +226,28 @@ Data access is governed by the **portal toggles**, not by these flags: this serv
 
 ### Messages (20 tools)
 
-| Tool                              | Description                                                 |
-| --------------------------------- | ----------------------------------------------------------- |
-| `discord_read_messages`           | Read messages and their embeds, paging back through history |
-| `discord_send_message`            | Send a plain text message                                   |
-| `discord_reply_message`           | Reply to a specific message                                 |
-| `discord_edit_message`            | Edit a message sent by the bot                              |
-| `discord_delete_message`          | Delete a specific message                                   |
-| `discord_add_reaction`            | Add a reaction emoji to a message                           |
-| `discord_remove_reactions`        | Remove reactions (all, by emoji, or by user)                |
-| `discord_get_reactions`           | List users who reacted with a specific emoji                |
-| `discord_create_thread`           | Create a thread from a message or standalone                |
-| `discord_bulk_delete_messages`    | Delete multiple messages at once (2-100)                    |
-| `discord_send_embed`              | Send a rich embed with all options                          |
-| `discord_edit_embed`              | Edit an embed previously sent by the bot                    |
-| `discord_send_multiple_embeds`    | Send up to 10 embeds in a single message                    |
-| `discord_pin_message`             | Pin or unpin a message                                      |
-| `discord_get_message_attachments` | List a message's attachments with download urls             |
-| `discord_fetch_pinned_messages`   | List all pinned messages in a channel                       |
-| `discord_search_messages`         | Search messages by keyword (last 100)                       |
-| `discord_search_guild_messages`   | Search a server via Discord's index (filters and paging)    |
-| `discord_crosspost_message`       | Publish a message to announcement channel followers         |
-| `discord_forward_message`         | Forward a message to another channel                        |
+| Tool                              | Description                                              |
+| --------------------------------- | -------------------------------------------------------- |
+| `discord_read_messages`           | Deprecated alias of `discord_search_messages`            |
+| `discord_send_message`            | Send a plain text message                                |
+| `discord_reply_message`           | Reply to a specific message                              |
+| `discord_edit_message`            | Edit a message sent by the bot                           |
+| `discord_delete_message`          | Delete a specific message                                |
+| `discord_add_reaction`            | Add a reaction emoji to a message                        |
+| `discord_remove_reactions`        | Remove reactions (all, by emoji, or by user)             |
+| `discord_get_reactions`           | List users who reacted with a specific emoji             |
+| `discord_create_thread`           | Create a thread from a message or standalone             |
+| `discord_bulk_delete_messages`    | Delete multiple messages at once (2-100)                 |
+| `discord_send_embed`              | Send a rich embed with all options                       |
+| `discord_edit_embed`              | Edit an embed previously sent by the bot                 |
+| `discord_send_multiple_embeds`    | Send up to 10 embeds in a single message                 |
+| `discord_pin_message`             | Pin or unpin a message                                   |
+| `discord_get_message_attachments` | List a message's attachments with download urls          |
+| `discord_fetch_pinned_messages`   | List the pinned messages in a channel, with filters      |
+| `discord_search_messages`         | Read or filter a channel's history, paging back or forth |
+| `discord_search_guild_messages`   | Search a server via Discord's index (filters and paging) |
+| `discord_crosspost_message`       | Publish a message to announcement channel followers      |
+| `discord_forward_message`         | Forward a message to another channel                     |
 
 ### Channels (8 tools)
 
@@ -422,6 +422,9 @@ discord-mcp/
 │   ├── client.ts            ← Discord client + shared helpers
 │   ├── constants.ts         ← Shared constants (limits, defaults)
 │   ├── embeds.ts            ← Shared embed schema + builder
+│   ├── messageText.ts       ← What a message says (content, embeds, forwards)
+│   ├── messageFilters.ts    ← Filters of the message searches (keyword, regex, has…)
+│   ├── channelScan.ts       ← Walk a channel's history through a filter
 │   └── tools/
 │       ├── index.ts         ← Tool registry (toolset gating, dispatch)
 │       ├── define.ts        ← defineTool/defineModule + shared zod fields
