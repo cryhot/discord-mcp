@@ -26,8 +26,11 @@ import {
 import {
   MessageFilter,
   RoleLookup,
+  appendNativeFilters,
   messageFilterShape,
   oneOrMany,
+  propertyFilterShape,
+  textFilterShape,
   targetOfMessage,
   targetOfRaw,
   toList,
@@ -194,7 +197,9 @@ const channelMessage = messageSummary.extend({ attachments: z.number(), pinned: 
 const channelSearchSchema = z
   .object({
     channel_id: snowflake.describe("ID (snowflake) of the channel or thread to search."),
-    ...messageFilterShape,
+    ...messageFilterShape(
+      "To list a channel's pins, prefer discord_fetch_pinned_messages: it reads the pins directly, whereas this walks the history and only sees the messages it looks at (limit_search).",
+    ),
     limit: intIn(1, MAX_FETCH_LIMIT)
       .default(DEFAULTS.MESSAGES)
       .describe(
@@ -257,7 +262,7 @@ async function searchChannel(args: z.infer<typeof channelSearchSchema>) {
 
 /** What the filters of the search tools do, said once. */
 const FILTERS_DOC =
-  "Filters (keyword, regex, author_id, role_id, has) take one value or a list: a message is kept when it passes every filter given, and, within one filter, when it matches any of its values. Text filters read what the author wrote: the content, embeds they wrote (not link previews), polls and forwarded messages, but not the message a reply answers.";
+  "Filters (keyword, regex, author_id, role_id, author_type, has, attachment_filename, attachment_extension, mentions, mentions_role_id, mention_everyone, replied_to_user_id, replied_to_message_id, pinned) take one value or a list, except pinned and mention_everyone, which are true or false: a message is kept when it passes every filter given, and, within one filter, when it matches any of its values. Text filters read what the author wrote: the content, embeds they wrote (not link previews), polls and forwarded messages, but not the message a reply answers.";
 
 /** Fields every message of a search result carries. */
 const MESSAGE_FIELDS_DOC = `Each message has id, author, content, ${embedsReturned}, timestamp, attachments (count) and pinned.`;
@@ -663,18 +668,15 @@ const tools = [
     description:
       "Search a server's messages with Discord's native search index, across every channel and thread the bot can read, with no limit on how far back it looks. Age-restricted (NSFW) channels are excluded unless include_nsfw is true. " +
       FILTERS_DOC +
-      " Differences with discord_search_messages: keyword is a single text (Discord's index takes one) and also matches embed text; channel_id is accepted here; keyword, author_id, channel_id and has are applied by Discord, whereas regex and role_id are applied here to what Discord returned. limit is how many messages to return (1–100, fetched 25 at a time); limit_search only matters with regex or role_id, and is how many of Discord's results to look at, since a result that does not pass them is dropped. total_results is Discord's count before regex and role_id. When hasMore is true, carry on with offset set to nextOffset: Discord caps offset at 9975, so narrow the search with min_id and max_id to go past the first 10000 hits. Returns { total_results, matches: [...], hasMore }, each match also carrying channel_id and channel_name. " +
+      " Differences with discord_search_messages: keyword is a single text (Discord's index takes one) and also matches embed text; channel_id is accepted here; every filter but regex and role_id is applied by Discord, whereas regex and role_id are applied here to what Discord returned. limit is how many messages to return (1–100, fetched 25 at a time); limit_search only matters with regex or role_id, and is how many of Discord's results to look at, since a result that does not pass them is dropped. total_results is Discord's count before regex and role_id. When hasMore is true, carry on with offset set to nextOffset: Discord caps offset at 9975, so narrow the search with min_id and max_id to go past the first 10000 hits. Returns { total_results, matches: [...], hasMore }, each match also carrying channel_id and channel_name. " +
       MESSAGE_FIELDS_DOC +
       " Requires READ_MESSAGE_HISTORY. Use discord_search_messages to search one channel.",
     annotations: { title: "Search guild messages", readOnlyHint: true, openWorldHint: true },
     schema: z.object({
       guild_id: guildId,
-      query: z
-        .string()
-        .min(1)
-        .max(1024)
+      channel_id: oneOrMany(snowflake)
         .optional()
-        .describe("Deprecated: the former name of keyword."),
+        .describe("Only this channel or thread ID, or any of these."),
       keyword: z
         .string()
         .min(1)
@@ -683,13 +685,14 @@ const tools = [
         .describe(
           "Text to search for (case-insensitive, max 1024 characters). One keyword only. Optional when another filter such as has, author_id, or channel_id narrows the search.",
         ),
-      channel_id: oneOrMany(snowflake)
+      query: z
+        .string()
+        .min(1)
+        .max(1024)
         .optional()
-        .describe("Only this channel or thread ID, or any of these."),
-      author_id: messageFilterShape.author_id,
-      regex: messageFilterShape.regex,
-      role_id: messageFilterShape.role_id,
-      has: messageFilterShape.has,
+        .describe("Deprecated: the former name of keyword."),
+      regex: textFilterShape.regex,
+      ...propertyFilterShape("Applied by Discord."),
       min_id: snowflake
         .optional()
         .describe("Only messages newer than this message ID (snowflake)."),
@@ -732,22 +735,21 @@ const tools = [
       nextOffset: z.number().optional().describe("Pass as offset to carry on."),
     }),
     handle: async (args) => {
-      const { guild_id, query, channel_id, author_id, has, min_id, max_id } = args;
+      const { guild_id, query, channel_id, min_id, max_id } = args;
       if (args.keyword !== undefined && query !== undefined && args.keyword !== query)
         throw new Error("Pass keyword, not both keyword and its former name query.");
       const keyword = args.keyword ?? query;
       const params = new URLSearchParams({ limit: String(args.limit) });
       if (keyword !== undefined) params.set("content", keyword);
       for (const id of toList(channel_id)) params.append("channel_id", id);
-      for (const id of toList(author_id)) params.append("author_id", id);
-      for (const type of toList(has)) params.append("has", type);
+      appendNativeFilters(params, args);
       if (min_id) params.set("min_id", min_id);
       if (max_id) params.set("max_id", max_id);
       if (args.sort_order) params.set("sort_order", args.sort_order);
       if (args.include_nsfw) params.set("include_nsfw", "true");
       if (args.offset !== undefined) params.set("offset", String(args.offset));
 
-      // Discord applies keyword, author_id, channel_id and has; regex and role_id are applied
+      // Discord applies every filter but regex and role_id, which are applied
       // here, so a result that does not pass them is dropped and more are looked at.
       const local = new MessageFilter({ regex: args.regex, role_id: args.role_id });
       const guild = await discord.guilds.fetch(guild_id);
@@ -971,14 +973,18 @@ const tools = [
     annotations: { title: "Fetch pinned messages", readOnlyHint: true, openWorldHint: true },
     schema: z.object({
       channel_id: snowflake.describe("ID (snowflake) of the channel or thread to list pins from."),
-      ...messageFilterShape,
+      ...messageFilterShape(
+        "Accepted for consistency with the other searches: every message here is pinned, so true changes nothing, and false matches nothing, so no message is returned and Discord is not called.",
+      ),
     }),
     outputSchema: z.object({
       messages: z.array(messageSummary.extend({ pinnedAt: z.string() })),
     }),
     handle: async (args) => {
+      if (args.pinned === false) return structured({ messages: [] });
       const channel = await getTextChannel(args.channel_id);
-      const filter = new MessageFilter(args);
+      // Every pin is pinned: the filter has nothing to check there.
+      const filter = new MessageFilter({ ...args, pinned: undefined });
       const roles = filter.needsRoles ? new RoleLookup(channel.guild) : undefined;
       // The pins endpoint pages at 50, newest pin first: walk back by pin time while it has more.
       const pins: MessagePin<true>[] = [];

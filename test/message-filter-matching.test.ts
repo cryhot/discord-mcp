@@ -12,7 +12,19 @@ import {
 const AUTHOR = "999999999999999999";
 
 function target(texts: string[], has: FilterTarget["has"] = new Set(), authorId = AUTHOR) {
-  return { authorId, texts, has } satisfies FilterTarget;
+  return {
+    authorId,
+    authorType: "user",
+    texts,
+    has,
+    pinned: false,
+    mentionedUserIds: new Set<string>(),
+    mentionedRoleIds: new Set<string>(),
+    mentionsEveryone: false,
+    repliedToMessageId: undefined,
+    repliedToUserId: undefined,
+    attachmentNames: [],
+  } satisfies FilterTarget;
 }
 
 test("keyword keeps a message that contains any of the keywords, ignoring case", () => {
