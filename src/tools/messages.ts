@@ -12,6 +12,7 @@ import {
 import { z } from "zod";
 import { discord, getTextChannel, fetchChannelChecked } from "../client.js";
 import { MAX_FETCH_LIMIT, DEFAULTS, AUTO_ARCHIVE_DURATIONS } from "../constants.js";
+import { downloadAttachments, MAX_DOWNLOAD_BYTES } from "../downloads.js";
 import { buildEmbed, embedFieldsShape, embedArraySchema } from "../embeds.js";
 import { defineModule, defineTool, snowflake, guildId, intIn, structured } from "./define.js";
 
@@ -794,6 +795,84 @@ const tools = [
         spoiler: a.spoiler,
       }));
       return structured({ attachments });
+    },
+  }),
+  defineTool({
+    name: "discord_download_attachment",
+    description: `Save the file attachments of a message to the machine this server runs on. Pass exactly one of output_dir (a folder, each file keeps its name) and output_file (the full path of the file, for one attachment); a relative path starts at the server's working directory and a leading ~ is the home directory. A file is never overwritten: if it exists, the new one is saved as name.1, name.2 and so on, as wget does, unless no_clobber is true, which skips the download instead. Downloads are opt-in: the file must sit, once symlinks are resolved, inside a directory listed in the DISCORD_DOWNLOAD_DIRS environment variable, and every download is refused while that variable is unset. Files over ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MiB are refused, and only Discord's attachment hosts are contacted. Requires the View Channel and Read Message History permissions. Returns { files: [{ attachment_id, filename, path, size, status }] } where status is saved or skipped. Use discord_get_message_attachments to list the attachments of a message without saving them.`,
+    annotations: {
+      title: "Download attachment",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    schema: z
+      .object({
+        channel_id: channelId.describe(
+          "ID (snowflake) of the channel or thread containing the message.",
+        ),
+        message_id: messageId.describe("ID of the message whose attachments to save."),
+        attachment_id: snowflake
+          .optional()
+          .describe(
+            "ID of the attachment to save, from discord_get_message_attachments. Default: every attachment of the message.",
+          ),
+        output_dir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Folder to save into, created if needed. Each file keeps its Discord file name. Exclusive with output_file.",
+          ),
+        output_file: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Full path of the file to write, replacing the file name. Needs a single attachment: pass attachment_id when the message has several. Exclusive with output_dir.",
+          ),
+        no_clobber: z
+          .boolean()
+          .default(false)
+          .describe(
+            "If the file already exists, skip the download and report it as skipped, instead of saving a numbered copy.",
+          ),
+      })
+      .refine(
+        (args) => (args.output_dir === undefined) !== (args.output_file === undefined),
+        "Pass exactly one of output_dir and output_file.",
+      ),
+    outputSchema: z.object({
+      files: z.array(
+        z.object({
+          attachment_id: z.string(),
+          filename: z.string().describe("The file name on Discord."),
+          path: z.string().describe("Where the file is, or was found when skipped."),
+          size: z.number().describe("Size in bytes."),
+          status: z.enum(["saved", "skipped"]),
+        }),
+      ),
+    }),
+    handle: async (args) => {
+      const channel = await getTextChannel(args.channel_id);
+      const msg = await channel.messages.fetch({ message: args.message_id, cache: false });
+      const all = [...msg.attachments.values()];
+      const chosen =
+        args.attachment_id === undefined ? all : all.filter((a) => a.id === args.attachment_id);
+      if (chosen.length === 0)
+        throw new Error(
+          args.attachment_id === undefined
+            ? "The message has no attachment."
+            : `The message has no attachment ${args.attachment_id}. Its attachments: ${all.map((a) => a.id).join(", ") || "none"}.`,
+        );
+      const files = await downloadAttachments({
+        attachments: chosen.map((a) => ({ id: a.id, name: a.name, size: a.size, url: a.url })),
+        outputDir: args.output_dir,
+        outputFile: args.output_file,
+        noClobber: args.no_clobber,
+      });
+      return structured({ files });
     },
   }),
   defineTool({

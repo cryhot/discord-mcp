@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `discord_download_attachment` saves the attachments of a message to local files. It takes exactly one of `output_dir` (a folder, each file keeps its name) and `output_file` (the full path, for one attachment), and an optional `attachment_id` to pick one. A file is never overwritten: an existing `a.png` leaves the new file as `a.png.1`, `a.png.2` and so on, as `wget` does, unless `no_clobber` is true, which skips the download. Downloads are opt-in: a file is written only if it sits, once symlinks are resolved, inside a directory listed in the new `DISCORD_DOWNLOAD_DIRS` environment variable, separated like `PATH` (`:`, or `;` on Windows), and every download is refused while that variable is unset, so a tool call cannot write anywhere on the machine. Files over 100 MiB are refused and only Discord's attachment hosts are contacted.
+
 ## [2.2.0] - 2026-09-03
 
 ### Added
